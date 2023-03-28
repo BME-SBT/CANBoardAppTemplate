@@ -3,11 +3,16 @@
 
 #include "platform.h"
 #include "log.h"
+#include "lib/ringbuffer.h"
+
+#define CAN_DEBUG_REG 0
+#define CAN_DEBUG 0
 
 // Config mode registers
 #define REG_CNF3 0x28
 #define REG_CNF2 0x29
 #define REG_CNF1 0x2a
+#define REG_EFLG 0x2d
 #define REG_TXRTSCTRL 0x0d // TXxRTS pin control and status register
 #define REG_BFPCTRL 0x0c   // RXnBF pin control and status register
 
@@ -51,11 +56,11 @@
 #define REG_RXBnD0(n) (0x66 + (n * 0x10)) // Transmit buffer databyte 0
 
 // Receive control flags
-#define RXBNCTRL_RXM_2 (1 << 6)    // Receive buffer operating mode, 11=mask off, 10=only valid eid, 01=only valid id, 00=all valid
-#define RXBNCTRL_RXRTR (1 << 3)    // 1 = RTR received
-#define RXB0CTRL_BUKT (1 << 2)     // 1 = roll message over to RX1 if valid but RX0 is full
-#define RXBNCTRL_FILHIT0 (1 << 0)  // Which acceptance filter got hit - RX0
-#define RXB1CTRL_FILHIT_3 (1 << 2) // Which acceptance filter got hit - RX1
+#define RXBNCTRL_RXM_2 (1 << 6)   // Receive buffer operating mode, 11=mask off, 10=only valid eid, 01=only valid id, 00=all valid
+#define RXBNCTRL_RXRTR (1 << 3)   // 1 = RTR received
+#define RXB0CTRL_BUKT (1 << 2)    // 1 = roll message over to RX1 if valid but RX0 is full
+#define RXBNCTRL_FILHIT0 (1 << 0) // Which acceptance filter got hit - RX0
+#define RXB1CTRL_FILHIT_3 (0b111) // Which acceptance filter got hit - RX1
 
 #define RXBNSIDL_SRR (1 << 4)  // Standard frame RTR bit
 #define RXBNSIDL_IDE (1 << 3)  // 1 = Received extended frame
@@ -79,13 +84,46 @@
 // Interrupt stuff
 #define REG_CANINTE (0x2b)
 #define REG_CANINTF (0x2c)
+#define CANINTF_ERRIF (1 << 5)
 
-#define CANINTF_RXnIE(n) (0x01 << n)
 #define CANINTF_RXnIF(n) (0x01 << n)
 #define CANINTF_TXnIF(n) (0x04 << n)
 
+struct PacketData
+{
+    int sid;
+    bool extended = false;
+    int eid;
+    bool rtr;
+    int dlc;
+    int length;
+    u8 filter;
+    uint8_t data[8];
+
+    void reset()
+    {
+        sid = 0;
+        extended = false;
+        eid = 0;
+        rtr = false;
+        dlc = 0;
+        length = 0;
+        filter = 0;
+        memset(data, 0, 8);
+    }
+};
+
 class MCP2510
 {
+public:
+    enum class OperationMode
+    {
+        Configuration,
+        Sleep,
+        ListenOnly,
+        Loopback,
+        Normal,
+    };
 
 public:
     MCP2510(int cs, int interrupt, long clock_freq, long spi_freq) : m_cs_pin(cs),
@@ -93,15 +131,50 @@ public:
                                                                      m_clock_freq(clock_freq)
     {
         m_settings = SPISettings(spi_freq, BitOrder::MSBFIRST, SPI_MODE0);
+        m_rx_packet_buffer.reset();
+        m_tx_packet_buffer.reset();
+    }
+
+    int set_mode(OperationMode mode)
+    {
+        int target_mode_id = 0;
+        switch (mode)
+        {
+        case OperationMode::Normal:
+            target_mode_id = 0;
+            break;
+        case OperationMode::Sleep:
+            target_mode_id = 0b001;
+            break;
+        case OperationMode::Loopback:
+            target_mode_id = 0b010;
+            break;
+        case OperationMode::ListenOnly:
+            target_mode_id = 0b011;
+            break;
+        case OperationMode::Configuration:
+            target_mode_id = 0b100;
+            break;
+        }
+
+        u8 target_val = target_mode_id << 5;
+        write_register(REG_CANCTRL, target_val);
+        if ((read_register(REG_CANSTAT) & 0b11100000) != target_val)
+        {
+            return -1;
+        }
+        return 0;
     }
 
     int begin(long can_baud)
     {
         // initialize chipselect
         pinMode(m_cs_pin, OUTPUT);
+        pinMode(m_int_pin, INPUT);
 
         // Reset the controller
         reset();
+        delayMicroseconds(10);
 
         // enter configuration mode
         write_register(REG_CANCTRL, 0x80);
@@ -115,7 +188,7 @@ public:
             return -1;
         }
 
-        write_register(REG_CANINTE, 0x00);     // no interrupts
+        write_register(REG_CANINTE, 0b11);     // RX0, RX1
         write_register(REG_BFPCTRL, 0x00);     // disable RX pins
         write_register(REG_TXRTSCTRL, 0x00);   // disable TX pins
         write_register(REG_RXBnCTRL(0), 0x60); // receive all frames
@@ -128,9 +201,17 @@ public:
             return -1;
         }
 
+        // attach interrupt
+        attachInterruptParam(m_int_pin, MCP2510::static_handle_interrupt, PinStatus::LOW, (void *)this);
         return 0;
     }
 
+    void handleInterrupt()
+    {
+        m_interrupted = true;
+    }
+
+    // Write packets
     int begin_packet(int id, int dlc, bool rtr)
     {
         if (id < 0 || id > 0x7ff)
@@ -259,36 +340,101 @@ public:
         return -2;
     }
 
+    // receive messages
+    int parse_packet()
+    {
+        uint8_t iflags = read_register(REG_CANINTF);
+        int n = 0;
+        if (iflags & CANINTF_RXnIF(0))
+        {
+            n = 0;
+        }
+        else if (iflags & CANINTF_RXnIF(1))
+        {
+            n = 1;
+        }
+        else
+        {
+            return 0;
+        }
+
+        logf_if(CAN_DEBUG, "reading packet from buffer #%d", n);
+
+        m_rx_packet_buffer.reset();
+
+        uint8_t ctrl = read_register(REG_RXBnCTRL(n));
+        bool rtr = (ctrl & RXBNCTRL_RXRTR) > 0;
+        uint8_t filter = 0;
+        if (n == 0)
+        {
+            filter = ctrl & RXBNCTRL_FILHIT0;
+        }
+        else if (n == 1)
+        {
+            filter = ctrl & RXB1CTRL_FILHIT_3;
+        }
+
+        u8 sidh = read_register(REG_RXBnSIDH(n));
+        u8 sidl = read_register(REG_RXBnSIDL(n));
+        u8 dlc = read_register(REG_RXBnDLC(n));
+        bool extended = (sidl & RXBNSIDL_IDE) > 0;
+        if (extended)
+        {
+            u8 eid8 = read_register(REG_RXBnEID8(n));
+            u8 eid0 = read_register(REG_RXBnEID0(n));
+            u32 eid = ((sidl & 0b11) << 16) | (eid8 << 8) | (eid0);
+            rtr = (dlc & RXBNDLC_RTR) > 0;
+            m_rx_packet_buffer.eid = eid;
+            m_rx_packet_buffer.extended = true;
+        }
+        else
+        {
+            u16 sid = (sidh << 3) | ((sidl & 0b11100000) >> 5);
+            rtr = (sidl & RXBNSIDL_SRR) > 0;
+            m_rx_packet_buffer.sid = sid;
+        }
+
+        u8 message_len = dlc & 0b1111;
+        m_rx_packet_buffer.dlc = message_len;
+        m_rx_packet_buffer.filter = filter;
+        for (int i = 0; i < message_len; i++)
+        {
+            u8 reg_addr = REG_RXBnD0(n) + i;
+            u8 data_byte = read_register(reg_addr);
+            m_rx_packet_buffer.data[i] = data_byte;
+        }
+        m_rx_packet_buffer.rtr = rtr;
+
+        // clear interrupt flag
+        modify_register(REG_CANINTF, CANINTF_RXnIF(n), 0);
+        return message_len;
+    }
+
+    /**
+     * Enables the overflowing of frames from RXB0 to RXB1
+     */
+    void enable_rx_overflow(bool enabled)
+    {
+        modify_register(REG_RXBnCTRL(0), RXB0CTRL_BUKT, enabled ? RXB0CTRL_BUKT : 0);
+    }
+
     void reset()
     {
         SPIWriter writer(m_settings, m_cs_pin);
         writer.transfer(0xc0);
-        delayMicroseconds(10);
+    }
+
+    bool available()
+    {
+        return !m_rx_buffer.is_empty();
+    }
+
+    PacketData read()
+    {
+        return m_rx_buffer.get();
     }
 
 private:
-    struct PacketData
-    {
-        int sid;
-        bool extended = false;
-        int eid;
-        bool rtr;
-        int dlc;
-        int length;
-        uint8_t data[8];
-
-        void reset()
-        {
-            sid = 0;
-            extended = false;
-            eid = 0;
-            rtr = false;
-            dlc = 0;
-            length = 0;
-            memset(data, 0, 8);
-        }
-    };
-
     int
     setup_clock_magic(long baudRate)
     {
@@ -353,7 +499,24 @@ private:
         writer.transfer(0b0000011);
         writer.transfer(reg);
         uint8_t retval = writer.transfer(0x00); // read data
+        // logf_if(CAN_DEBUG_REG, "SPI rreg: %x value=%x", reg, retval);
+
+        if (reg == REG_CANINTF && (retval & CANINTF_ERRIF))
+        {
+            // detected error
+            // get_error();
+            // modify_register(REG_CANINTF, CANINTF_ERRIF, 0);
+        }
+
         return retval;
+    }
+
+    u8 get_error()
+    {
+        u8 eflg = read_register(REG_EFLG);
+        logf("CAN error: %x", eflg);
+        // TODO: Handle error
+        return eflg;
     }
 
     void write_register(uint8_t reg, uint8_t value)
@@ -362,6 +525,7 @@ private:
         writer.transfer(0b0000010);
         writer.transfer(reg);
         writer.transfer(value); // send data
+        // logf_if(CAN_DEBUG_REG, "SPI wreg: %x value=%x", reg, value);
     }
 
     void modify_register(uint8_t reg, uint8_t mask, uint8_t val)
@@ -371,16 +535,25 @@ private:
         writer.transfer(reg);
         writer.transfer(mask);
         writer.transfer(val);
+        // logf_if(CAN_DEBUG_REG, "SPI mreg: %x mask=%x value=%x", reg, mask, val);
+    }
+
+    static void static_handle_interrupt(void *instance)
+    {
+        ((MCP2510 *)(instance))->handleInterrupt();
     }
 
 private:
     int m_cs_pin;
     int m_int_pin;
     long m_clock_freq;
+    volatile bool m_interrupted;
     SPISettings m_settings;
 
     bool m_tx_packet_begun = false;
     PacketData m_tx_packet_buffer;
+    PacketData m_rx_packet_buffer;
+    StackRingBuffer<PacketData, 16> m_rx_buffer;
 };
 
 #endif

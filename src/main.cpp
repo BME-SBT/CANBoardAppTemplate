@@ -1,45 +1,82 @@
 #include <Arduino.h>
-#include "platform.h"
-#include "driver/mcp2510.h"
-#include "log.h"
+#include <hardware/irq.h>
+#include "platform/platform.h"
+#include "driver/can/spi_mcp2510.h"
+#include "platform/log.h"
+#include "app.h"
 
-MCP2510 can_driver(PLATFORM_PIN_CAN_CS, 1, 16E6, 250E4);
+enum class AppState
+{
+    SETUP,
+    USER_SETUP,
+    LOOP,
+    FATAL,
+};
+
+static AppState g_state = AppState::SETUP;
+
 void setup()
 {
-  // SerialUSB.begin(115200);
-  //   put your setup code here, to run once:
-  platform_init();
+    platform_init();
+}
 
-  // initialize can
-  if (can_driver.begin(250E3))
-  {
-    log("CAN init failed");
-  }
+void global_setup()
+{
+    // Global setup
+    g_state = AppState::USER_SETUP;
+}
+
+void user_setup()
+{
+    // User setup
+    int err = app_setup();
+    if (err)
+    {
+        platform_set_status(err);
+        g_state = AppState::FATAL;
+    }
+    else
+    {
+        g_state = AppState::LOOP;
+    }
+}
+
+void user_loop()
+{
+    int err = app_loop();
+    if (err)
+    {
+        platform_set_status(err);
+        g_state = AppState::FATAL;
+    }
+}
+
+void global_error()
+{
+    // TODO: Log error if possible
+    while (2)
+    {
+        // wait for watchdog restart
+    }
 }
 
 void loop()
 {
-  // SerialUSB.println("loop");
-  //  put your main code here, to run repeatedly:
-  if (can_driver.begin_packet(0x5a5, 0, false) < 0)
-  {
-    log("failed to start packet");
-  }
-  can_driver.write(0);
-  can_driver.write(1);
-  can_driver.write(2);
-  can_driver.write(4);
-  can_driver.write(8);
-  can_driver.write(16);
-  can_driver.write(32);
-  can_driver.write(64);
-  int error_code = can_driver.end_packet();
-  if (error_code < 0)
-  {
-    log("failed to send message :(");
-    log("error code: ");
-    log(error_code);
-  }
-
-  delay(500);
+    platform_preloop();
+    switch (g_state)
+    {
+    case AppState::SETUP:
+        global_setup();
+        break;
+    case AppState::USER_SETUP:
+        user_setup();
+        break;
+    case AppState::LOOP:
+        user_loop();
+        break;
+    case AppState::FATAL:
+        global_error();
+        break;
+    }
+    platform_postloop();
 }

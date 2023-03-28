@@ -1,7 +1,7 @@
-#include "platform.h"
-#include "log.h"
+#include "platform/platform.h"
+#include "platform/log.h"
 
-MbedSPI PLATFORM_SPI(PLATFORM_PIN_SPI_MISO, PLATFORM_PIN_SPI_MOSI, PLATFORM_PIN_SPI_SCK);
+u8 status_last_error = 0;
 
 void platform_init()
 {
@@ -13,6 +13,4 @@ void platform_init()
     SerialUSB.println("");
     SerialUSB.println("");
     log("Initializing platform...");
-
-    PLATFORM_SPI.begin();
 }

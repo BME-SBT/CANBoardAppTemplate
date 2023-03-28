@@ -1,0 +1,11 @@
+// TODO: Autogenerate
+
+#ifndef STATUS_H
+#define STATUS_H
+
+#define STATUS_CAN_RESETWAIT 0x01
+#define STATUS_CAN_RESETFAILED 0x02
+#define STATUS_CAN_INVALIDSPEED 0x03
+#define STATUS_CAN_MODESETWAIT 0x04
+
+#endif
