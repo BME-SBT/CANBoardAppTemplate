@@ -57,7 +57,8 @@
         "thread": "cpp",
         "cinttypes": "cpp",
         "typeinfo": "cpp",
-        "*.impl": "cpp"
+        "*.impl": "cpp",
+        "future": "cpp"
     },
     "cmake.configureOnOpen": false
 }

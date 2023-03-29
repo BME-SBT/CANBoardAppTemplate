@@ -1,7 +1,7 @@
 #ifndef CAN_TIMING_H
 #define CAN_TIMING_H
 
-#include "platform/platform.h"
+#include "lib/inttypes.h"
 
 static const struct
 {

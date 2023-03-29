@@ -1,13 +1,22 @@
+#ifndef SPI_MCP2510_H
+#define SPI_MCP2510_H
+
 /*
  * This driver is based on the mcp251x.c driver from Linux and uses raw pico-sdk SPI access.
  *
  * This is both an SPI and a CAN driver
  */
-#include "platform/platform.h"
 #include "driver/can/can_timing.h"
 #include <hardware/spi.h>
 #include <pico/mutex.h>
+#include <pico/util/queue.h>
 #include <hardware/gpio.h>
+#include "lib/inttypes.h"
+#include <cstring>
+
+#define CAN_BUSY 0xfe
+
+#define CAN_RX_QUEUE_LEN 16
 
 #define INSTRUCTION_WRITE 0x02
 #define INSTRUCTION_READ 0x03
@@ -167,177 +176,33 @@ struct Priv
     u8 spi_tx_buf[SPI_TRANSFER_BUF_LEN];
     u8 spi_rx_buf[SPI_TRANSFER_BUF_LEN];
     spi_inst_t *spi;
+    bool tx_busy;
+    queue_t can_rx_queue;
 };
 
-static int mcp251x_spi_write(Priv *priv, size_t len)
+struct CAN_Frame
 {
-    gpio_put(PLATFORM_PIN_CAN_CS, 0);
-    int ret = spi_write_blocking(priv->spi, priv->spi_tx_buf, len);
-    gpio_put(PLATFORM_PIN_CAN_CS, 1);
-    if (ret != (int)len)
+    union
     {
-        return ERR_SPI_WRITE_FAILED;
-    }
-    return 0;
-}
+        u16 standard_id;
+        u32 extended_id;
+    };
+    bool rtr;
+    bool extended;
+    u8 dlc;
+    u8 data[8];
 
-static int mcp251x_spi_transfer(Priv *priv, size_t len)
-{
-    gpio_put(PLATFORM_PIN_CAN_CS, 0);
-    int ret = spi_write_read_blocking(priv->spi, priv->spi_tx_buf, priv->spi_rx_buf, len);
-    gpio_put(PLATFORM_PIN_CAN_CS, 1);
-    return ret;
-}
+    CAN_Frame() = default;
 
-static int mcp251x_read_reg(Priv *priv, u8 reg)
-{
-    priv->spi_tx_buf[0] = INSTRUCTION_READ;
-    priv->spi_tx_buf[1] = reg;
-
-    mcp251x_spi_transfer(priv, 3);
-    return priv->spi_rx_buf[2];
-}
-
-static void mcp251x_write_reg(Priv *priv, u8 reg, u8 value)
-{
-    priv->spi_tx_buf[0] = INSTRUCTION_WRITE;
-    priv->spi_tx_buf[1] = reg;
-    priv->spi_tx_buf[2] = value;
-
-    mcp251x_spi_write(priv, 3);
-}
-
-static void mcp251x_write_bits(Priv *priv, u8 reg, u8 mask, u8 value)
-{
-    priv->spi_tx_buf[0] = INSTRUCTION_BIT_MODIFY;
-    priv->spi_tx_buf[1] = reg;
-    priv->spi_tx_buf[2] = mask;
-    priv->spi_tx_buf[3] = value;
-
-    mcp251x_spi_write(priv, 4);
-}
-
-static u8 mcp251x_read_stat(Priv *priv)
-{
-    return mcp251x_read_reg(priv, CANSTAT) & CANCTRL_REQOP_MASK;
-}
-
-static int mcp251x_reset(Priv *priv)
-{
-    delay(5); // Wait for oscillator startup
-
-    // send reset
-    priv->spi_tx_buf[0] = INSTRUCTION_RESET;
-    int ret = mcp251x_spi_write(priv, 1);
-    if (ret)
+    CAN_Frame(u16 sid, u8 *data, u8 dlc)
     {
-        return ret;
+        this->standard_id = sid;
+        memcpy(this->data, data, dlc);
+        this->dlc = dlc;
     }
-    delay(5); // Wait for oscillator reset
+};
 
-    // wait for reset
-    while (mcp251x_read_stat(priv) != CANCTRL_REQOP_CONF)
-    {
-        platform_set_status(STATUS_CAN_RESETWAIT); // signal waiting for can reset, we cannot proceed without CAN
-    }
+int mcp251x_start_tx(Priv *priv, CAN_Frame &frame);
+Priv *mcp251x_platform_init(int clock_freq, int baudrate);
 
-    return 0;
-}
-
-static void mcp251x_can_isr(void *device)
-{
-}
-
-static int mcp251x_set_bittiming(Priv *priv, int clock_freq, int baudrate)
-{
-    const u8 *cnf = nullptr;
-    for (unsigned int i = 0; i < (sizeof(mcp251x_cnf_mapper)) / sizeof(mcp251x_cnf_mapper[0]); i++)
-    {
-        if (mcp251x_cnf_mapper[i].clockFrequency == clock_freq && mcp251x_cnf_mapper[i].baudRate == baudrate)
-        {
-            cnf = mcp251x_cnf_mapper[i].cnf;
-            break;
-        }
-    }
-
-    if (!cnf)
-    {
-        return STATUS_CAN_INVALIDSPEED;
-    }
-    mcp251x_write_reg(priv, CNF1, cnf[0]);
-    mcp251x_write_reg(priv, CNF2, cnf[1]);
-    mcp251x_write_reg(priv, CNF3, cnf[2]);
-
-    return 0;
-}
-
-static int mcp251x_set_normal_mode(Priv *priv)
-{
-    // enable all interrupts
-    mcp251x_write_reg(priv, CANINTE, CANINTE_ERRIE | CANINTE_TX2IE | CANINTE_TX1IE | CANINTE_TX0IE | CANINTE_RX1IE | CANINTE_RX0IE);
-
-    /* Put device into normal mode */
-    mcp251x_write_reg(priv, CANCTRL, CANCTRL_REQOP_NORMAL);
-
-    // set normalmode
-    while (mcp251x_read_stat(priv) != CANCTRL_REQOP_NORMAL)
-    {
-        platform_set_status(STATUS_CAN_MODESETWAIT); // signal waiting for can reset, we cannot proceed without CAN
-    }
-
-    return 0;
-}
-
-static Priv *mcp251x_platform_init(int clock_freq, int baudrate)
-{
-    // init spi
-    _spi_init(PLATFORM_CAN_SPI, PLATFORM_CAN_SPI_BAUD);
-    gpio_set_function(PLATFORM_PIN_SPI_MISO, GPIO_FUNC_SPI);
-    gpio_set_function(PLATFORM_PIN_SPI_MOSI, GPIO_FUNC_SPI);
-    gpio_set_function(PLATFORM_PIN_SPI_SCK, GPIO_FUNC_SPI);
-    // todo: spi set format
-
-    // init cs
-    _gpio_init(PLATFORM_PIN_CAN_CS);
-    gpio_set_dir(PLATFORM_PIN_CAN_CS, GPIO_OUT);
-    gpio_put(PLATFORM_PIN_CAN_CS, 1); // CS is active low
-
-    Priv *instance = new Priv;
-    mutex_init(&instance->mcp_lock);
-    memset(instance->spi_tx_buf, 0, SPI_TRANSFER_BUF_LEN);
-    memset(instance->spi_rx_buf, 0, SPI_TRANSFER_BUF_LEN);
-
-    mutex_enter_blocking(&instance->mcp_lock);
-
-    attachInterruptParam(PLATFORM_PIN_CAN_INT, mcp251x_can_isr, PinStatus::FALLING, instance);
-
-    // reset device
-    int ret = mcp251x_reset(instance);
-    if (ret != 0)
-    {
-        platform_set_status(STATUS_CAN_RESETFAILED);
-        goto retnull;
-    }
-
-    ret = mcp251x_set_bittiming(instance, clock_freq, baudrate);
-    if (ret)
-    {
-        platform_set_status(ret);
-        goto retnull;
-    }
-
-    mcp251x_write_reg(instance, RXBCTRL(0), RXBCTRL_BUKT | RXBCTRL_RXM0 | RXBCTRL_RXM1);
-    mcp251x_write_reg(instance, RXBCTRL(1), RXBCTRL_RXM0 | RXBCTRL_RXM1);
-
-    // Skip null return
-    goto normalret;
-
-retnull:
-    delete instance;
-    instance = nullptr;
-    detachInterrupt(PLATFORM_PIN_CAN_INT);
-
-normalret:
-    mutex_exit(&instance->mcp_lock);
-    return instance;
-}
+#endif
