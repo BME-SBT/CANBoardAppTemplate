@@ -3,11 +3,11 @@
 
 #include <Arduino.h>
 #include <SPI.h>
-#include "lib/utils.h"
-#include "lib/inttypes.h"
-#include "platform/status.h"
-#include "platform/log.h"
-#include "driver/can/can.h"
+#include "../lib/utils.h"
+#include "../lib/inttypes.h"
+#include "status.h"
+#include "log.h"
+#include "../driver/can/can.h"
 
 #define PLATFORM_PIN_SPI_SCK 2
 #define PLATFORM_CAN_SPI_BAUD 1E6    // 1 MHz

@@ -1,7 +1,7 @@
 #ifndef CAN_H
 #define CAN_H
 
-#include "driver/can/spi_mcp2510.h"
+#include "spi_mcp2510.h"
 
 #define CAN_QUEUED 0xff
 #define CAN_QUEUE_FULL 0xfc

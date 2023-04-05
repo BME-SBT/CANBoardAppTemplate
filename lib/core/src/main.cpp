@@ -1,36 +1,27 @@
-#include <Arduino.h>
-#include <hardware/irq.h>
-#include "platform/platform.h"
-#include "driver/can/spi_mcp2510.h"
-#include "platform/log.h"
 #include "app.h"
+#include "platform/log.h"
+#include "platform/platform.h"
+#include <Arduino.h>
 
-enum class AppState
-{
+enum class AppState {
     SETUP,
     USER_SETUP,
     LOOP,
     FATAL,
 };
 
-static struct
-{
+static struct {
     u64 last_loop_time;
 } stats;
 
 static AppState g_state = AppState::SETUP;
 
-void setup()
-{
-    platform_init();
-}
+void setup() { platform_init(); }
 
-void global_setup()
-{
+void global_setup() {
     // Global setup
     bool err = PLATFORM_CAN.init();
-    if (err)
-    {
+    if (err) {
         g_state = AppState::FATAL;
     }
 
@@ -38,45 +29,38 @@ void global_setup()
     g_state = AppState::USER_SETUP;
 }
 
-void user_setup()
-{
+void user_setup() {
     // User setup
     int err = app_setup();
-    if (err)
-    {
+    if (err) {
         platform_set_status(err);
         g_state = AppState::FATAL;
-    }
-    else
-    {
+    } else {
         g_state = AppState::LOOP;
     }
 }
 
 u8 last_status = 0;
 u64 last_status_print = 0;
-void user_loop()
-{
+void user_loop() {
     int err = app_loop();
-    if (err)
-    {
+    if (err) {
         platform_set_status(err);
         g_state = AppState::FATAL;
     }
-    if (platform_status_last != last_status || millis() > (last_status_print + 1000))
-    {
-        logf("status: %x, loop-time: %dus", platform_status_last, (int)stats.last_loop_time);
+    if (platform_status_last != last_status ||
+        millis() > (last_status_print + 1000)) {
+        logf("status: %x, loop-time: %dus", platform_status_last,
+             (int)stats.last_loop_time);
         last_status = platform_status_last;
         last_status_print = millis();
     }
 }
 
-void global_error()
-{
+void global_error() {
     // TODO: Log error if possible
 
-    while (2)
-    {
+    while (2) {
         delay(100);
         SerialUSB.print("HARD ERROR: ");
         SerialUSB.print(platform_status_last, HEX);
@@ -84,12 +68,10 @@ void global_error()
     }
 }
 
-void loop()
-{
+void loop() {
     u64 start = micros();
     platform_preloop();
-    switch (g_state)
-    {
+    switch (g_state) {
     case AppState::SETUP:
         global_setup();
         break;

@@ -8,6 +8,7 @@ u64 counter = 0;
 u16 id = 0;
 u64 last_sent = 0;
 u64 send_delay = 100;
+
 int app_loop()
 {
     if (last_sent + 100 < millis())

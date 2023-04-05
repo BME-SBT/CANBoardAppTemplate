@@ -6,12 +6,12 @@
  *
  * This is both an SPI and a CAN driver
  */
-#include "driver/can/can_timing.h"
+#include "can_timing.h"
 #include <hardware/spi.h>
 #include <pico/mutex.h>
 #include <pico/util/queue.h>
 #include <hardware/gpio.h>
-#include "lib/inttypes.h"
+#include "../../lib/inttypes.h"
 #include <cstring>
 
 #define CAN_BUSY 0xfe
