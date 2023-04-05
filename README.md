@@ -2,6 +2,12 @@
 
 This example project serves as a template for app development targeting the HEF CAN Boards.
 
+Required dependencies:
+
+- PlatformIO
+- Python3
+  - pyyaml
+
 ## Create a new app
 
 1. Clone this repo (--recuresive required for the core library):
