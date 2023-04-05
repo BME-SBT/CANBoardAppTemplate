@@ -1,0 +1,4 @@
+[submodule "lib/core"]
+	path = lib/core
+	url = https://github.com/BME-SBT/CANBoardCore
+	branch = master
