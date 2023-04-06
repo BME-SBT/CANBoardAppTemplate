@@ -1,15 +1,16 @@
 #include "app.h"
+#include "lib/inttypes.h"
 
-int app_setup()
+PlatformStatus app_setup()
 {
-    return 0;
+    return PlatformStatus::STATUS_OK;
 }
 u64 counter = 0;
 u16 id = 0;
 u64 last_sent = 0;
 u64 send_delay = 100;
 
-int app_loop()
+PlatformStatus app_loop()
 {
     if (last_sent + 100 < millis())
     {
@@ -40,5 +41,5 @@ int app_loop()
         }
     }
 
-    return 0;
+    return PlatformStatus::STATUS_OK;
 }
