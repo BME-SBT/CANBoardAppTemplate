@@ -1,44 +1,30 @@
 #include "app.h"
+
 #include "lib/inttypes.h"
 
-PlatformStatus app_setup()
-{
-    return PlatformStatus::STATUS_OK;
-}
+PlatformStatus app_setup() { return PlatformStatus::STATUS_OK; }
 u64 counter = 0;
 u16 id = 0;
 u64 last_sent = 0;
 u64 send_delay = 100;
 
-PlatformStatus app_loop()
-{
-    if (last_sent + 100 < millis())
-    {
-        last_sent = millis();
-        send_delay = 100;
+PlatformStatus app_loop() {
 
-        CAN_Frame frame(id, reinterpret_cast<u8 *>(&counter), 8);
-        int sent = PLATFORM_CAN.send(frame);
-        if (!sent)
-        {
-            logf("sent ID=%x, data=%p", id, (void *)counter);
-        }
-        else if (sent == CAN_QUEUED)
-        {
-            logf("queued ID=%x, data=%p", id, (void *)counter);
-        }
-        else
-        {
-            logf("send error: %x ID=%x, data=%p", sent, id, (void *)counter);
-            send_delay = 1000;
-        }
+    CAN_Frame frame(id, reinterpret_cast<u8 *>(&counter), 8);
 
-        counter += 1;
-        id += 1;
-        if (id > 0x7ff)
-        {
-            id = 0;
-        }
+    PLATFORM_CAN.send(frame);
+    PLATFORM_CAN.send(frame);
+    PLATFORM_CAN.send(frame);
+    PLATFORM_CAN.send(frame);
+
+    counter += 1;
+    id += 1;
+    if (id > 0x7ff) {
+        id = 0;
+    }
+    while (PLATFORM_CAN.available()) {
+        __attribute__((unused)) CAN_Frame rv = PLATFORM_CAN.get_frame();
+        LOGF("got frame: %d %p", rv.standard_id, *(uint64_t*) (rv.data));
     }
 
     return PlatformStatus::STATUS_OK;
